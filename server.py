@@ -193,7 +193,7 @@ async def edit_image(
     _require_key()
     body: dict = {
         "prompt": prompt, "image": image, "model": model,
-        "size": size, "quality": quality, "response_format": response_format,
+        "size": size, "quality": quality, "response_format": "b64_json",  # url format broken on most models
     }
     for k, v in {"seed": seed, "nologo": nologo, "enhance": enhance, "safe": safe}.items():
         if v is not None:
@@ -212,13 +212,35 @@ async def edit_image(
 
     item = (result.get("data") or [{}])[0]
     out = {"prompt": prompt, "model": model, "size": size}
-    if response_format == "url":
-        out["imageUrl"] = item.get("url", "")
+
+    # Try URL first, fall back to b64_json
+    image_url = item.get("url", "")
+    b64 = item.get("b64_json", "")
+
+    if image_url:
+        out["imageUrl"] = image_url
+    elif b64:
+        # Upload to Pollinations media storage to get a stable URL
+        try:
+            img_bytes = base64.b64decode(b64)
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.post(
+                    f"{MEDIA_BASE}/upload",
+                    headers=_h(),
+                    files={"file": ("edited.jpg", io.BytesIO(img_bytes), "image/jpeg")},
+                )
+                if r.status_code == 200:
+                    out["imageUrl"] = r.json().get("url", "")
+                else:
+                    # Return b64 directly as fallback
+                    out["base64"] = b64
+                    out["mimeType"] = "image/jpeg"
+        except Exception:
+            out["base64"] = b64
+            out["mimeType"] = "image/jpeg"
     else:
-        raw = item.get("b64_json", "")
-        out["base64"] = raw[:100] + "...[truncated]" if len(raw) > 100 else raw
-        out["mimeType"] = "image/jpeg"
-        out["note"] = "Use response_format='url' for full image access"
+        raise ToolError("Pollinations returned no image data. The model may not support editing.")
+
     return out
 
 
