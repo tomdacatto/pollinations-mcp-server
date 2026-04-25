@@ -344,7 +344,8 @@ async def list_image_models() -> dict:
     async with httpx.AsyncClient(timeout=30) as c:
         r = await c.get(f"{API_BASE}/image/models")
         r.raise_for_status()
-        models = r.json()
+        data = r.json()
+    models = data if isinstance(data, list) else data.get("models", [])
     imgs = [m for m in models if "video" not in (m.get("output_modalities") or [])]
     vids = [m for m in models if "video" in (m.get("output_modalities") or [])]
     return {
