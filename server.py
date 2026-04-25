@@ -21,7 +21,10 @@ from fastmcp.exceptions import ToolError
 # ---------------------------------------------------------------------------
 
 API_BASE = "https://gen.pollinations.ai"
-TIMEOUT = 120.0  # seconds (video gen can be slow)
+IMAGE_BASE = "https://image.pollinations.ai"  # legacy endpoint, better for img2img
+TIMEOUT = 120.0        # default
+TIMEOUT_IMG2IMG = 360.0  # image-to-image is slow — official docs use 300s, we add buffer
+TIMEOUT_VIDEO = 300.0  # video generation
 
 # Module-level key store — populated from env or via setApiKey tool
 _api_key: str = os.environ.get("POLLINATIONS_API_KEY", "")
@@ -97,6 +100,16 @@ def _build_url(path: str, params: dict) -> str:
     return base
 
 
+def _build_image_url(prompt: str, params: dict, use_legacy: bool = False) -> str:
+    """Build image generation URL. Uses legacy image.pollinations.ai for img2img (more reliable)."""
+    encoded = quote(prompt, safe="")
+    base_host = IMAGE_BASE if use_legacy else API_BASE
+    url = f"{base_host}/image/{encoded}" if not use_legacy else f"{base_host}/prompt/{encoded}"
+    if params:
+        url += "?" + urlencode({k: v for k, v in params.items() if v is not None})
+    return url
+
+
 def _shareable_url(path: str, params: dict) -> str:
     clean = {k: v for k, v in params.items() if k not in ("key", "token")}
     return _build_url(path, clean)
@@ -109,15 +122,15 @@ async def _get_json(path: str) -> list:
         return r.json()
 
 
-async def _fetch_binary(url: str) -> tuple[bytes, str]:
-    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+async def _fetch_binary(url: str, timeout: float = TIMEOUT) -> tuple[bytes, str]:
+    async with httpx.AsyncClient(timeout=timeout) as c:
         r = await c.get(url, headers=_headers(), follow_redirects=True)
         r.raise_for_status()
         return r.content, r.headers.get("content-type", "application/octet-stream")
 
 
-async def _post_json(path: str, body: dict) -> dict:
-    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+async def _post_json(path: str, body: dict, timeout: float = TIMEOUT) -> dict:
+    async with httpx.AsyncClient(timeout=timeout) as c:
         r = await c.post(
             f"{API_BASE}{path}",
             json=body,
@@ -200,8 +213,15 @@ async def generate_image_url(
     _require_key()
     params = _image_params(model, width, height, seed, enhance, negative_prompt,
                            guidance_scale, quality, image, transparent, nologo, nofeed, safe, private)
+    is_img2img = image is not None
     encoded = quote(prompt, safe="")
-    url = _shareable_url(f"/image/{encoded}", params)
+    if is_img2img:
+        # Use legacy image.pollinations.ai endpoint — more reliable for img2img
+        url = f"{IMAGE_BASE}/prompt/{encoded}"
+    else:
+        url = f"{API_BASE}/image/{encoded}"
+    if params:
+        url += "?" + urlencode({k: v for k, v in params.items() if v is not None})
     return {"imageUrl": url, "prompt": prompt, "model": model, "width": width, "height": height}
 
 
@@ -229,11 +249,20 @@ async def generate_image(
     quality: low | medium | high | hd
     """
     _require_key()
+    is_img2img = image is not None
     params = _image_params(model, width, height, seed, enhance, negative_prompt,
                            guidance_scale, quality, image, transparent, nologo, nofeed, safe, private)
     encoded = quote(prompt, safe="")
-    url = _build_url(f"/image/{encoded}", params)
-    data, content_type = await _fetch_binary(url)
+    if is_img2img:
+        # Use legacy endpoint — more reliable, and increase timeout significantly
+        fetch_url = f"{IMAGE_BASE}/prompt/{encoded}"
+        timeout = TIMEOUT_IMG2IMG
+    else:
+        fetch_url = f"{API_BASE}/image/{encoded}"
+        timeout = TIMEOUT
+    if params:
+        fetch_url += "?" + urlencode({k: v for k, v in params.items() if v is not None})
+    data, content_type = await _fetch_binary(fetch_url, timeout=timeout)
     b64 = base64.b64encode(data).decode()
     return {
         "base64": b64,
@@ -320,7 +349,7 @@ async def generate_video(
     }.items() if v is not None}
     encoded = quote(prompt, safe="")
     url = _build_url(f"/image/{encoded}", params)
-    data, content_type = await _fetch_binary(url)
+    data, content_type = await _fetch_binary(url, timeout=TIMEOUT_VIDEO)
     b64 = base64.b64encode(data).decode()
     return {"base64": b64, "mimeType": content_type or "video/mp4", "prompt": prompt, "model": model, "duration": duration}
 
